@@ -1,13 +1,22 @@
 // Flujo 2 (pago): builds, proves, balances (via the connected wallet) and
 // submits a `pay` transaction against the VinchiNotes contract on whatever
-// network /midnight/.env selects. Spends exactly 4 existing, unspent notes
-// (all sharing the same maturesAt — that's a hard protocol constraint, not
-// a choice made here — see the CRITICAL comment on selectSpendGroup below),
-// producing a merchant-output note and a change-output note back to the
-// payer. Mirrors send_deposit.tsx's structure/style closely.
+// network /midnight/.env selects. `pay` always spends exactly 4 existing,
+// unspent notes, ALL sharing the same maturesAt — a hard protocol constraint
+// (see VinchiNotes.compact's `pay` circuit and its PAY_INPUTS=4 padding
+// requirement), not a choice made here.
+//
+// A first-time payer never has 4 matching notes lying around, so this module
+// auto-fills whatever's missing: it deposits directly to the payer's own
+// wallet-seed identity (see noteWallet.ts), backs up each new note's
+// breadcrumb (noteBackup.ts) so it's immediately spendable, and only then
+// builds and submits `pay`. From the caller's side this is still one
+// send_pay() call / one "Pay" click — see ensurePayableGroup below for the
+// actual top-up logic. Nothing here touches the contracts; this is purely
+// frontend orchestration of ordinary deposit + pay transactions.
 import { useState, useEffect, type FormEvent } from 'react';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
+import type { PublicDataProvider } from '@midnight-ntwrk/midnight-js-types';
 import { resolveNetwork, getContractAddress } from './midnight/network';
 import { connectWallet } from './midnight/wallet';
 import { buildProviders } from './midnight/providers';
@@ -27,6 +36,33 @@ const PRIVATE_STATE_ID = 'vinchiNotesPrivateState';
 
 /** pay always spends exactly 4 note inputs — see VinchiNotes.compact's `pay` circuit signature. */
 const PAY_INPUT_COUNT = 4;
+
+/**
+ * Auto-top-up padding notes only need to be nonzero (deposit's contract-level
+ * assert requires amount > 0) — their sole job is filling pay's fixed
+ * 4-input slot when the payer doesn't have that many real notes yet. 1 STAR
+ * is a millionth of a NIGHT: negligible, and it stays spendable afterward
+ * (nothing forces it to be "used up" — it just becomes part of this
+ * maturesAt group for a future payment too).
+ */
+const PADDING_NOTE_AMOUNT_STAR = 1n;
+
+/**
+ * How far in the future a *freshly chosen* auto-top-up maturesAt is set when
+ * there's no existing note group to build on. Only needs to clear deposit's
+ * "must be in the future" check with headroom for proof generation + tx
+ * submission latency; nothing else depends on this value.
+ */
+const AUTO_TOPUP_MATURES_AT_OFFSET_SECONDS = 60 * 60;
+
+/**
+ * An existing note group is only reused as a top-up target if its maturesAt
+ * clears "now" by at least this much — otherwise a `deposit` meant to land
+ * a few seconds from now could arrive after maturesAt has already passed and
+ * fail deposit's "must be in the future" assert. See the comment in
+ * ensurePayableGroup for what happens to a group that fails this check.
+ */
+const MIN_TOPUP_DEPOSIT_HORIZON_SECONDS = 5 * 60;
 
 export interface PayParams {
   /** Bytes32 hex (with or without 0x) — who receives the payment. */
@@ -60,15 +96,8 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-/**
- * CRITICAL protocol constraint: `pay` always consumes exactly 4 real notes
- * as inputs, ALL sharing the exact same `maturesAt`, ALL already present in
- * noteTree and ALL unspent. There is no way to fabricate "padding" notes —
- * every input must be a genuine existing note the payer owns. This groups
- * spendable notes by maturesAt and picks the first group with >= 4 members;
- * it does not try to find the "best" group, just a usable one.
- */
-function selectSpendGroup(spendable: OwnedNote[]): OwnedNote[] {
+/** Largest maturesAt-sharing group of spendable notes, or undefined if there are none at all. */
+function pickBestGroup(spendable: OwnedNote[]): { maturesAt: bigint; notes: OwnedNote[] } | undefined {
   const groups = new Map<string, OwnedNote[]>();
   for (const note of spendable) {
     const key = note.body.maturesAt.toString();
@@ -76,24 +105,143 @@ function selectSpendGroup(spendable: OwnedNote[]): OwnedNote[] {
     if (group) group.push(note);
     else groups.set(key, [note]);
   }
-  for (const group of groups.values()) {
-    if (group.length >= PAY_INPUT_COUNT) return group;
+  let best: { maturesAt: bigint; notes: OwnedNote[] } | undefined;
+  for (const notes of groups.values()) {
+    if (!best || notes.length > best.notes.length) best = { maturesAt: notes[0].body.maturesAt, notes };
   }
-  const sizes = Array.from(groups.values(), (g) => g.length);
-  throw new Error(
-    `Paying requires ${PAY_INPUT_COUNT} unspent notes sharing the same maturity date. ` +
-      `You have: [${sizes.join(', ')}]. Make more deposits with a matching maturesAt first.`,
-  );
+  return best;
+}
+
+/** True if the first PAY_INPUT_COUNT notes of this group alone cover amountStar. */
+function groupIsPayable(notes: OwnedNote[], amountStar: bigint): boolean {
+  if (notes.length < PAY_INPUT_COUNT) return false;
+  const sum = notes.slice(0, PAY_INPUT_COUNT).reduce((s, n) => s + n.body.amount, 0n);
+  return sum >= amountStar;
+}
+
+/**
+ * Deposits `amountStar` to the payer's own wallet-seed identity and backs up
+ * the resulting note's breadcrumb, so it's immediately visible to a
+ * subsequent listOwnedNotes() call — same deterministic (seed, index) nonce
+ * chain Flujo 6 relies on, unlike send_deposit.tsx's demo form (which uses a
+ * random nonce and never backs anything up, by design — it targets an
+ * arbitrary recipientOwner, not necessarily this browser's own wallet).
+ */
+async function selfDeposit(params: {
+  seed: Uint8Array;
+  myOwnerCommitment: Uint8Array;
+  amountStar: bigint;
+  maturesAt: bigint;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  deployed: any;
+}): Promise<void> {
+  const { seed, myOwnerCommitment, amountStar, maturesAt, deployed } = params;
+  const index = await nextBreadcrumbIndex(seed);
+  const nonce = await deriveNoteNonce(seed, index);
+  await deployed.callTx.deposit(amountStar, myOwnerCommitment, maturesAt, nonce);
+  await generate_commitment({ seed, index, amount: amountStar, maturesAt });
+}
+
+/**
+ * Returns 4 spendable notes, all sharing a maturesAt, summing to at least
+ * amountStar — depositing whatever's missing (to the payer's own identity)
+ * first if the payer doesn't already have such a group. Prefers topping up
+ * the payer's largest existing maturesAt group over starting a fresh one, so
+ * repeated payments don't scatter NIGHT across many small groups.
+ *
+ * The one case this can't paper over: an existing group that already has all
+ * 4 slots filled but doesn't sum to enough — pay's fixed input count means a
+ * 5th note can't be added to top it up, so that surfaces as an error instead.
+ */
+async function ensurePayableGroup(params: {
+  seed: Uint8Array;
+  myOwnerCommitment: Uint8Array;
+  amountStar: bigint;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  deployed: any;
+  publicDataProvider: PublicDataProvider;
+  vinchiNotesAddress: string;
+  onProgress?: (message: string) => void;
+}): Promise<OwnedNote[]> {
+  const { seed, myOwnerCommitment, amountStar, deployed, publicDataProvider, vinchiNotesAddress, onProgress } = params;
+
+  const readSpendable = async () => spendableNotes(await listOwnedNotes(seed, publicDataProvider, vinchiNotesAddress));
+
+  const initial = pickBestGroup(await readSpendable());
+  if (initial && groupIsPayable(initial.notes, amountStar)) {
+    return initial.notes.slice(0, PAY_INPUT_COUNT);
+  }
+
+  // Reusing an existing partial group as the top-up target only works if
+  // it's still safely in the future: `deposit` requires maturesAt to be
+  // strictly ahead of block time, so a group left over from an earlier pay
+  // (e.g. this is the 3rd payment, hours after the 1st) can go stale between
+  // calls. Notes already at a stale maturesAt remain perfectly spendable —
+  // pay itself has no time check — but nothing more can ever be deposited
+  // into that group, so if it's short of 4 notes it would be permanently
+  // stuck below the count pay needs. Abandon it as a target in that case and
+  // start a fresh group instead; the old notes just wait for a future
+  // payment where they alone (or alongside other old notes at that same
+  // maturesAt) happen to reach 4.
+  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+  const initialStillDepositable =
+    initial !== undefined && initial.maturesAt > nowSeconds + BigInt(MIN_TOPUP_DEPOSIT_HORIZON_SECONDS);
+
+  const targetMaturesAt = initialStillDepositable
+    ? initial!.maturesAt
+    : BigInt(Math.floor(Date.now() / 1000) + AUTO_TOPUP_MATURES_AT_OFFSET_SECONDS);
+  const existing = initialStillDepositable ? initial!.notes : [];
+  const existingSum = existing.reduce((s, n) => s + n.body.amount, 0n);
+  const neededCount = PAY_INPUT_COUNT - existing.length;
+
+  if (initial && !initialStillDepositable) {
+    onProgress?.(
+      `Your existing notes mature too soon to top up safely — starting a fresh group ` +
+        `(old notes remain spendable once 4 of them line up on their own).`,
+    );
+  }
+
+  if (neededCount <= 0) {
+    throw new Error(
+      `You already have ${existing.length} unspent notes sharing a maturity date, but they only total ` +
+        `${existingSum} STAR — this payment needs ${amountStar}. pay always spends exactly ${PAY_INPUT_COUNT} ` +
+        `notes, so a 5th note can't be added to top this group up; deposit ahead of time with a different ` +
+        `maturesAt instead.`,
+    );
+  }
+
+  const shortfall = amountStar > existingSum ? amountStar - existingSum : 0n;
+  onProgress?.(`Not enough notes yet — auto-depositing ${neededCount} more to fill pay's 4-note input.`);
+  for (let i = 0; i < neededCount; i++) {
+    const depositAmount = i === 0 && shortfall > 0n ? shortfall : PADDING_NOTE_AMOUNT_STAR;
+    onProgress?.(`Auto-deposit ${i + 1}/${neededCount} (${depositAmount} STAR)…`);
+    // Sequential and awaited: each deposit's breadcrumb must land before
+    // nextBreadcrumbIndex() is called again for the next one.
+    await selfDeposit({ seed, myOwnerCommitment, amountStar: depositAmount, maturesAt: targetMaturesAt, deployed });
+  }
+
+  onProgress?.('Auto-deposits confirmed — rechecking spendable notes…');
+  const finalGroup = (await readSpendable()).filter((n) => n.body.maturesAt === targetMaturesAt);
+  if (!groupIsPayable(finalGroup, amountStar)) {
+    throw new Error('Auto top-up deposits landed but the resulting notes still cannot cover this payment — please retry.');
+  }
+  return finalGroup.slice(0, PAY_INPUT_COUNT);
 }
 
 /**
  * Pays a registered merchant from the connected browser's own note wallet
- * (see noteWallet.ts's deterministic seed derivation). Connects the
+ * (see noteWallet.ts's deterministic seed derivation), auto-depositing
+ * whatever notes are missing first (see ensurePayableGroup). Connects the
  * injected wallet, resolves network + contract addresses from
  * /midnight/.env, and drives the whole build-prove-balance-submit pipeline
  * through the DApp Connector API — see src/midnight/ for each stage.
+ *
+ * onProgress, if given, is called with a short human-readable status string
+ * at each step — useful since a first-time payer's single "Pay" click can
+ * now involve several sequential transactions (up to 4 auto-deposits, then
+ * pay itself) rather than just one.
  */
-export async function send_pay(params: PayParams): Promise<PayResult> {
+export async function send_pay(params: PayParams, onProgress?: (message: string) => void): Promise<PayResult> {
   if (params.amountStar <= 0n) throw new Error('amountStar must be positive');
   const merchantOwnerCommitmentBytes = parseBytes32(params.merchantOwnerCommitment, 'merchantOwnerCommitment');
 
@@ -104,6 +252,7 @@ export async function send_pay(params: PayParams): Promise<PayResult> {
   const { network, config } = resolveNetwork();
   setNetworkId(network);
 
+  onProgress?.('Connecting wallet…');
   const connectedAPI = await connectWallet(network);
 
   const providers = await buildProviders(connectedAPI, {
@@ -111,13 +260,46 @@ export async function send_pay(params: PayParams): Promise<PayResult> {
     fallback: config,
   });
 
-  const notes = await listOwnedNotes(seed, providers.publicDataProvider, getContractAddress('VINCHI_NOTES'));
-  const spendable = spendableNotes(notes);
-  const group = selectSpendGroup(spendable);
-  const selectedInputs = group.slice(0, PAY_INPUT_COUNT);
+  // compiledContracts.ts's VinchiNotesWitnesses type declares every witness
+  // as `(...args: never[]) => never` (the shape of the throwing stubs) — too
+  // narrow for a real implementation that actually returns a value. Cast
+  // through `any` here rather than widen that shared type just for this one
+  // caller; deposit's default (all-throwing) witnesses still typecheck fine.
+  //
+  // Built once, up front: deposit invokes no witness, so this same instance
+  // (with the real nullifierKeyFor implementation pay needs) is reused below
+  // for any auto-top-up deposits too, instead of standing up the contract
+  // binding twice.
+  const compiledContract = loadVinchiNotesCompiledContract({
+    nullifierKeyFor: ((context: any, _owner: unknown) => [context.privateState, nullifierKey]) as any,
+  });
+
+  // The compiled contract's exact generic shape isn't worth fighting the
+  // type checker over here — back/contracts/src/cli.ts and deploy.ts already
+  // cast the same way for the same reason (see those files), and
+  // send_deposit.tsx follows suit for this same project.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const deployed: any = await findDeployedContract(providers as any, {
+    compiledContract: compiledContract as any,
+    contractAddress: getContractAddress('VINCHI_NOTES'),
+    privateStateId: PRIVATE_STATE_ID,
+    initialPrivateState: {},
+  });
+
+  const selectedInputs = await ensurePayableGroup({
+    seed,
+    myOwnerCommitment,
+    amountStar: params.amountStar,
+    deployed,
+    publicDataProvider: providers.publicDataProvider,
+    vinchiNotesAddress: getContractAddress('VINCHI_NOTES'),
+    onProgress,
+  });
 
   const sumIn = selectedInputs.reduce((sum, n) => sum + n.body.amount, 0n);
   if (sumIn < params.amountStar) {
+    // Should be unreachable — ensurePayableGroup only ever returns a group it
+    // already verified covers the payment. Kept as a last line of defense.
     throw new Error(
       `Insufficient balance in this maturity group: have ${sumIn} STAR across ${selectedInputs.length} notes, ` +
         `requested ${params.amountStar} STAR.`,
@@ -128,6 +310,7 @@ export async function send_pay(params: PayParams): Promise<PayResult> {
 
   // Resolve the merchant's Merkle path before building/proving the
   // transaction — fail fast rather than paying proving costs for a doomed tx.
+  onProgress?.('Resolving merchant membership proof…');
   const merchantRegistryLedger = await queryMerchantRegistryLedger(
     providers.publicDataProvider,
     getContractAddress('MERCHANT_REGISTRY'),
@@ -177,29 +360,9 @@ export async function send_pay(params: PayParams): Promise<PayResult> {
     nonce: merchantNonce,
   };
 
-  // compiledContracts.ts's VinchiNotesWitnesses type declares every witness
-  // as `(...args: never[]) => never` (the shape of the throwing stubs) — too
-  // narrow for a real implementation that actually returns a value. Cast
-  // through `any` here rather than widen that shared type just for this one
-  // caller; deposit's default (all-throwing) witnesses still typecheck fine.
-  const compiledContract = loadVinchiNotesCompiledContract({
-    nullifierKeyFor: ((context: any, _owner: unknown) => [context.privateState, nullifierKey]) as any,
-  });
-
-  // The compiled contract's exact generic shape isn't worth fighting the
-  // type checker over here — back/contracts/src/cli.ts and deploy.ts already
-  // cast the same way for the same reason (see those files), and
-  // send_deposit.tsx follows suit for this same project.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const deployed: any = await findDeployedContract(providers as any, {
-    compiledContract: compiledContract as any,
-    contractAddress: getContractAddress('VINCHI_NOTES'),
-    privateStateId: PRIVATE_STATE_ID,
-    initialPrivateState: {},
-  });
-
   const inputs = selectedInputs.map((n) => ({ body: n.body, nonce: n.nonce, path: n.merklePath }));
 
+  onProgress?.('Paying…');
   const tx = await deployed.callTx.pay(inputs, merchantOutput, merchantPath, changeOutput);
 
   await generate_commitment({ seed, index: changeIndex, amount: changeAmount, maturesAt: sharedMaturesAt });
@@ -210,7 +373,11 @@ export async function send_pay(params: PayParams): Promise<PayResult> {
   return { txId: tx.public.txId, blockHeight: tx.public.blockHeight };
 }
 
-type FormStatus = { kind: 'idle' } | { kind: 'pending' } | { kind: 'success'; result: PayResult } | { kind: 'error'; message: string };
+type FormStatus =
+  | { kind: 'idle' }
+  | { kind: 'pending'; message: string }
+  | { kind: 'success'; result: PayResult }
+  | { kind: 'error'; message: string };
 
 /** Minimal clickable path to send_pay() for end-to-end validation testing. */
 export function PayForm() {
@@ -235,12 +402,12 @@ export function PayForm() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setStatus({ kind: 'pending' });
+    setStatus({ kind: 'pending', message: 'Paying…' });
     try {
-      const result = await send_pay({
-        merchantOwnerCommitment,
-        amountStar: BigInt(amountStar),
-      });
+      const result = await send_pay(
+        { merchantOwnerCommitment, amountStar: BigInt(amountStar) },
+        (message) => setStatus({ kind: 'pending', message }),
+      );
       setStatus({ kind: 'success', result });
     } catch (err) {
       // .message alone is often too thin — midnight-js-contracts wraps
@@ -285,6 +452,10 @@ export function PayForm() {
       <button type="submit" disabled={status.kind === 'pending'}>
         {status.kind === 'pending' ? 'Paying…' : 'Pay'}
       </button>
+      <p>
+        If you don't have 4 matching notes yet, this will auto-deposit what's missing first — one click still pays.
+      </p>
+      {status.kind === 'pending' && <p>{status.message}</p>}
       {status.kind === 'success' && (
         <p>
           Paid. Tx {status.result.txId} at block {status.result.blockHeight}.
