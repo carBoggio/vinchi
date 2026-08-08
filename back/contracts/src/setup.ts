@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   process.stdout.write(`\n→ Setting up contracts on network: ${network}\n\n`);
 
   // 1. Bring up only the services this network needs.
-  run('docker', ['compose', 'up', '-d', '--wait', ...config.composeServices]);
+  run('docker', ['compose', '-f', '../docker-compose.yml', 'up', '-d', '--wait', ...config.composeServices]);
 
   // 2. Compile the contract (network-agnostic).
   run('npm', ['run', 'compile']);

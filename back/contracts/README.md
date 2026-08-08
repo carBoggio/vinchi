@@ -4,7 +4,7 @@ A Midnight Network smart contract scaffolded with create-mn-app.
 
 ## Quick start
 
-Requirements: Node 22, Docker (with Compose v2), and the Compact compiler at the version pinned in `.compact-version` at the create-mn-app repo root (the version this project was scaffolded against).
+Requirements: Node 22, Docker (with Compose v2), and the Compact compiler. This contract requires Compact language version `>= 0.23` (see the `pragma` in `contracts/hello-world.compact`); install/upgrade the toolchain per https://docs.midnight.network/getting-started/installation.
 
 ```bash
 npm install
@@ -22,7 +22,7 @@ npm run test:e2e
 
 ## Local devnet
 
-The project ships its own devnet via `docker-compose.yml`:
+The devnet is defined one level up, at `back/docker-compose.yml` (shared with the rest of `back/`, not inside `contracts/`):
 
 | Service        | Port | Purpose                                         |
 | -------------- | ---- | ----------------------------------------------- |
@@ -30,7 +30,7 @@ The project ships its own devnet via `docker-compose.yml`:
 | `indexer`      | 8088 | GraphQL indexer for chain state                 |
 | `proof-server` | 6300 | Generates ZK proofs for contract transactions   |
 
-State lives in container-managed volumes. Tear everything down with:
+State lives in container-managed volumes. Tear everything down with (run from `back/`, or pass `-f ../docker-compose.yml` if you're in `back/contracts/`):
 
 ```bash
 docker compose down -v
@@ -179,32 +179,34 @@ generated state.
 ## Project structure
 
 ```
-contracts/
-├── contracts/
-│   └── hello-world.compact     # Compact source
-├── scripts/
-│   └── e2e-check.ts            # smoke + read-back
-├── src/
-│   ├── network.ts              # network selection + state file management
-│   ├── wallet.ts               # wallet construction + sync-state cache
-│   ├── setup.ts                # orchestrator for `npm run setup`
-│   ├── deploy.ts               # deploy the contract
-│   ├── cli.ts                  # interact with deployed contract
-│   └── check-balance.ts        # NIGHT / DUST balance
-├── docker-compose.yml          # node + indexer + proof-server
-├── .midnight-state.json        # written by deploy (gitignored)
-├── .midnight-wallet-state/     # serialized sync state per network (gitignored)
-├── package.json
-└── tsconfig.json
+back/
+├── docker-compose.yml          # node + indexer + proof-server (one level up from contracts/)
+└── contracts/
+    ├── contracts/
+    │   └── hello-world.compact     # Compact source
+    ├── scripts/
+    │   └── e2e-check.ts            # smoke + read-back
+    ├── src/
+    │   ├── network.ts              # network selection + state file management
+    │   ├── wallet.ts               # wallet construction + sync-state cache
+    │   ├── setup.ts                # orchestrator for `npm run setup`
+    │   ├── deploy.ts               # deploy the contract
+    │   ├── cli.ts                  # interact with deployed contract
+    │   └── check-balance.ts        # NIGHT / DUST balance
+    ├── .midnight-state.json        # written by deploy (gitignored)
+    ├── .midnight-wallet-state/     # serialized sync state per network (gitignored)
+    ├── package.json
+    └── tsconfig.json
 ```
 
 ## Compact compiler version
 
-`.compact-version` at the create-mn-app repo root pinned the compiler
-version this project was scaffolded against. To upgrade your local
-compiler to that version:
+This project has no pinned-compiler-version file; the required Compact
+language version is declared in the `pragma` at the top of
+`contracts/hello-world.compact` (currently `>= 0.23`). Install or upgrade
+the `compact` toolchain per
+https://docs.midnight.network/getting-started/installation, e.g.:
 
 ```bash
-compact update <version>
-compact use <version>
+compact update
 ```

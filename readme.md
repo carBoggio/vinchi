@@ -1,5 +1,11 @@
 # midnight
 
+## Requirements
+
+- Node.js 22+
+- Docker with Compose v2
+- The Compact compiler — installed globally, not via npm: `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh`, then `compact update` (see https://docs.midnight.network/getting-started/installation). Without this, `npm run compile` in `back/contracts/` fails with `compact: command not found`.
+
 Two independent npm projects:
 
 - `front/` — React + Vite. Run with:
