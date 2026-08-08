@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import './App.css';
 import { selectWallet } from './selectWallet';
+import { DepositForm } from './send_deposit';
+import { resolveNetwork } from './midnight/network';
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -11,7 +13,8 @@ function App() {
     setError(null);
     try {
       const wallet = selectWallet();
-      const connectedApi = await wallet.connect('undeployed');
+      const { network } = resolveNetwork();
+      const connectedApi = await wallet.connect(network);
       const { unshieldedAddress } = await connectedApi.getUnshieldedAddress();
       setWalletAddress(unshieldedAddress);
       setIsConnected(true);
@@ -41,6 +44,7 @@ function App() {
         )}
       </div>
       {error && <p style={{ color: 'red' }}>{error}</p>}
+      {isConnected && <DepositForm />}
     </div>
   );
 }

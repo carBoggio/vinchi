@@ -13,6 +13,8 @@
     "setup": "npx tsx src/setup.ts",
     "deploy": "npx tsx src/deploy.ts",
     "deploy:address": "npx tsx src/deploy-address.ts",
+    "generate-recipient": "npx tsx src/generate-recipient.ts",
+    "register-dust": "npx tsx src/register-dust.ts",
     "cli": "npx tsx src/cli.ts",
     "check-balance": "npx tsx src/check-balance.ts",
     "network": "npx tsx src/network.ts",
