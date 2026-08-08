@@ -9,7 +9,7 @@ import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { resolveNetwork, getContractAddress } from './midnight/network';
 import { connectWallet } from './midnight/wallet';
 import { buildProviders } from './midnight/providers';
-import { loadVinchiNotesCompiledContract, computeOwnerCommitment } from './midnight/depositContract';
+import { loadVinchiNotesCompiledContract, computeOwnerCommitment } from './midnight/compiledContracts';
 
 // deposit calls no witness, so its private state is always {} — same shape
 // as back/contracts' hello-world CLI's PRIVATE_STATE_ID convention.

@@ -1,37 +1,28 @@
 #!/usr/bin/env node
-// Copies VinchiNotes' compiled output from back/contracts/contracts/managed/
+// Copies each contract's compiled output from back/contracts/contracts/managed/
 // into front/, in two different shapes for two different consumers:
 //
-//   - keys/ + zkir/  -> public/zk/VinchiNotes/   (fetched over HTTP at
+//   - keys/ + zkir/  -> public/zk/<Contract>/   (fetched over HTTP at
 //     runtime by FetchZkConfigProvider — must be static assets, browsers
 //     can't read back/'s filesystem directly)
-//   - contract/      -> src/midnight/generated/VinchiNotes/  (imported as a
-//     normal ES module by depositContract.ts). This one specifically must
-//     live *inside* front/'s own source tree: a dynamic import reaching
-//     across to back/contracts/ resolves as a browser URL relative to the
-//     importing module, which cannot climb above the dev server's root —
-//     "../../../back/..." silently lands on a nonexistent front/back/ path
-//     instead of escaping to the sibling project. Copying avoids that class
-//     of bug entirely, in dev and in `vite build` alike.
+//   - contract/      -> src/midnight/generated/<Contract>/  (imported as a
+//     normal ES module). This one specifically must live *inside* front/'s
+//     own source tree: a dynamic import reaching across to back/contracts/
+//     resolves as a browser URL relative to the importing module, which
+//     cannot climb above the dev server's root — "../../../back/..."
+//     silently lands on a nonexistent front/back/ path instead of escaping
+//     to the sibling project. Copying avoids that class of bug entirely, in
+//     dev and in `vite build` alike.
 //
 // Plumbing only — no contract logic lives here. Safe to run before
-// back/contracts has compiled anything: it skips with a warning instead of
-// failing dev/build.
+// back/contracts has compiled anything: it skips (per-contract) with a
+// warning instead of failing dev/build.
 import { existsSync, cpSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONTRACT_NAME = 'VinchiNotes';
-const SRC = path.resolve(__dirname, '..', '..', 'back', 'contracts', 'contracts', 'managed', CONTRACT_NAME);
-
-if (!existsSync(SRC)) {
-  console.warn(
-    `[sync:contract-assets] ${SRC} does not exist yet — run "npm run compile:vinchi-notes" in back/contracts/ first. ` +
-      'Skipping copy; the deposit flow will fail until this has run at least once.',
-  );
-  process.exit(0);
-}
+const CONTRACT_NAMES = ['VinchiNotes', 'MerchantRegistry'];
 
 function syncDir(srcDir, destDir) {
   if (!existsSync(srcDir)) return;
@@ -39,13 +30,25 @@ function syncDir(srcDir, destDir) {
   cpSync(srcDir, destDir, { recursive: true });
 }
 
-const zkDest = path.resolve(__dirname, '..', 'public', 'zk', CONTRACT_NAME);
-for (const dir of ['keys', 'zkir']) {
-  syncDir(path.join(SRC, dir), path.join(zkDest, dir));
+for (const contractName of CONTRACT_NAMES) {
+  const src = path.resolve(__dirname, '..', '..', 'back', 'contracts', 'contracts', 'managed', contractName);
+
+  if (!existsSync(src)) {
+    console.warn(
+      `[sync:contract-assets] ${src} does not exist yet — run "npm run compile:${contractName.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase()}" in back/contracts/ first. ` +
+        `Skipping ${contractName}; flows depending on it will fail until this has run at least once.`,
+    );
+    continue;
+  }
+
+  const zkDest = path.resolve(__dirname, '..', 'public', 'zk', contractName);
+  for (const dir of ['keys', 'zkir']) {
+    syncDir(path.join(src, dir), path.join(zkDest, dir));
+  }
+
+  const contractDest = path.resolve(__dirname, '..', 'src', 'midnight', 'generated', contractName);
+  syncDir(path.join(src, 'contract'), contractDest);
+
+  console.log(`[sync:contract-assets] Copied ${contractName} keys/zkir to ${path.relative(process.cwd(), zkDest)}`);
+  console.log(`[sync:contract-assets] Copied ${contractName} contract bindings to ${path.relative(process.cwd(), contractDest)}`);
 }
-
-const contractDest = path.resolve(__dirname, '..', 'src', 'midnight', 'generated', CONTRACT_NAME);
-syncDir(path.join(SRC, 'contract'), contractDest);
-
-console.log(`[sync:contract-assets] Copied ${CONTRACT_NAME} keys/zkir to ${path.relative(process.cwd(), zkDest)}`);
-console.log(`[sync:contract-assets] Copied ${CONTRACT_NAME} contract bindings to ${path.relative(process.cwd(), contractDest)}`);

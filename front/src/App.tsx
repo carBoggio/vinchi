@@ -2,6 +2,8 @@ import { useState } from 'react';
 import './App.css';
 import { selectWallet } from './selectWallet';
 import { DepositForm } from './send_deposit';
+import { PayForm } from './send_pay';
+import { NotesView } from './get_notes';
 import { resolveNetwork } from './midnight/network';
 
 function App() {
@@ -44,7 +46,13 @@ function App() {
         )}
       </div>
       {error && <p style={{ color: 'red' }}>{error}</p>}
-      {isConnected && <DepositForm />}
+      {isConnected && (
+        <>
+          <NotesView />
+          <DepositForm />
+          <PayForm />
+        </>
+      )}
     </div>
   );
 }
