@@ -5,6 +5,10 @@ import { DepositForm } from './send_deposit';
 import { PayForm } from './send_pay';
 import { NotesView } from './get_notes';
 import { resolveNetwork } from './midnight/network';
+import { WalletHeader } from './components/WalletHeader';
+import { Tabs } from './components/Tabs';
+import { MaterializeForm } from './components/MaterializeForm';
+import { WithdrawForm } from './components/WithdrawForm';
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -35,23 +39,23 @@ function App() {
   return (
     <div>
       <h1>Midnight Wallet Connector</h1>
-      <div>
-        {isConnected && walletAddress ? (
-          <>
-            <p>Connected: {walletAddress}</p>
-            <button onClick={handleDisconnect}>Disconnect</button>
-          </>
-        ) : (
-          <button onClick={handleConnect}>Connect Wallet</button>
-        )}
-      </div>
-      {error && <p style={{ color: 'red' }}>{error}</p>}
+      <WalletHeader
+        isConnected={isConnected}
+        walletAddress={walletAddress}
+        error={error}
+        onConnect={handleConnect}
+        onDisconnect={handleDisconnect}
+      />
       {isConnected && (
-        <>
-          <NotesView />
-          <DepositForm />
-          <PayForm />
-        </>
+        <Tabs
+          tabs={[
+            { id: 'notes', label: 'Notes', content: <NotesView /> },
+            { id: 'deposit', label: 'Deposit', content: <DepositForm /> },
+            { id: 'pay', label: 'Pay', content: <PayForm /> },
+            { id: 'materialize', label: 'Materialize', content: <MaterializeForm /> },
+            { id: 'withdraw', label: 'Withdraw', content: <WithdrawForm /> },
+          ]}
+        />
       )}
     </div>
   );
