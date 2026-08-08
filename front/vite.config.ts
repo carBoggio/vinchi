@@ -25,12 +25,21 @@ export default defineConfig({
   // Repo-root .env (shared with back/contracts) is the single source of
   // truth for network + contract address config. See /midnight/.env.
   envDir: path.resolve(import.meta.dirname, '..'),
-  // Vite only exposes VITE_-prefixed vars to client code by default. The
-  // three extra entries below are exact variable names (not prefixes in the
-  // "any MIDNIGHT_* var" sense) — startsWith-matching a full name only
-  // matches that name, so MIDNIGHT_WALLET_SEED and friends in the same file
-  // stay server/CLI-only and never reach the browser bundle.
-  envPrefix: ['VITE_', 'MIDNIGHT_NETWORK', 'VINCHI_NOTES_ADDRESS', 'MERCHANT_REGISTRY_ADDRESS'],
+  // Vite only exposes VITE_-prefixed vars to client code by default. Every
+  // entry below is an exact variable name (not a prefix in the "any
+  // MIDNIGHT_* var" sense) — startsWith-matching a full name only matches
+  // that name, so MIDNIGHT_WALLET_SEED, MIDNIGHT_WALLET_MNEMONIC and
+  // DATABASE_PASSWORD in the same file stay server/CLI-only and never reach
+  // the browser bundle. SUPABASE_PUBLISHABLE_KEY is safe to ship client-side
+  // by design (it's RLS-gated, not a secret — see note_backups' migration).
+  envPrefix: [
+    'VITE_',
+    'MIDNIGHT_NETWORK',
+    'VINCHI_NOTES_ADDRESS',
+    'MERCHANT_REGISTRY_ADDRESS',
+    'SUPABASE_URL',
+    'SUPABASE_PUBLISHABLE_KEY',
+  ],
   server: {
     fs: {
       // Needed to import the compiled contract straight out of
