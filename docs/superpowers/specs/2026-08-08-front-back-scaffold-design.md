@@ -17,6 +17,7 @@ Objetivo: separar el proyecto en `front/` y `back/`, con las dependencias del ec
 - **Sin arquitectura previa**: no se recrea el modelo de notas/circuito `deposit` de la memoria de sesiones pasadas. El contrato de ejemplo es un contador Compact mínimo, sin relación con el dominio de pagos privados.
 - **Backend = solo infraestructura Midnight + contratos**: no hay servidor de aplicación propio (API) en esta fase. El `back` es la red local de Midnight (node + indexer + proof-server) y la carpeta de contratos. El front hablaría directo con la red local / wallet.
 - **Versiones pineadas**: se usa el set de versiones "known-good" documentado oficialmente (`@midnight-ntwrk/midnight-js-*@4.1.1`, `wallet-sdk@1.0.0`, `compact-runtime@^0.16.0`) en vez de dejar que npm resuelva `latest`, siguiendo la recomendación explícita de la documentación de Midnight.
+- **`back/contracts/` se genera con `create-mn-app`, no a mano**: `create-mn-app` es la CLI oficial de Midnight (`npx create-mn-app`) para scaffolding de contratos — ya resuelve el wiring de wallet/providers/deploy contra la red local (`hello-world` template, con devnet local incluida) con versiones compatibles entre sí. Escribir ese wiring a mano a partir de fragmentos de distintos repos de ejemplo tiene más riesgo de bugs sutiles de versión que usar la herramienta mantenida oficialmente. Después de generarlo, se reorganiza el resultado para que el `docker-compose.yml` quede en `back/` (no anidado en `back/contracts/`), respetando la estructura ya acordada.
 
 ## Estructura de archivos
 
@@ -33,63 +34,37 @@ midnight/
 │       └── selectWallet.ts   # conector mínimo de wallet Lace (DApp Connector API)
 │
 └── back/
-    ├── docker-compose.yml    # node + indexer-standalone + proof-server (red 'undeployed')
+    ├── docker-compose.yml    # node + indexer + proof-server (red 'undeployed') — movido acá tras generar contracts/
     └── contracts/
-        ├── package.json      # scripts: compact (compilar), deploy
-        ├── tsconfig.json
-        ├── counter.compact   # contrato de ejemplo
+        ├── package.json      # generado por create-mn-app: scripts de compile/deploy
+        ├── contracts/
+        │   └── hello-world.compact   # contrato de ejemplo (template oficial)
         └── src/
-            ├── config.ts     # endpoints de la red local (undeployed)
-            └── deploy.ts     # script de deploy contra la red local
+            ├── deploy.ts     # generado: wiring de providers + deploy contra la red local
+            ├── cli.ts        # generado: interactuar con el contrato ya desplegado
+            └── check-balance.ts
 ```
 
 ## `back/docker-compose.yml`
 
-Tres servicios, red `undeployed`, con healthchecks (`indexer` espera a que `node` esté healthy):
-
-| Servicio | Imagen | Puerto host |
-|---|---|---|
-| `node` | `midnightntwrk/midnight-node:1.0.0` | `9944` |
-| `indexer` | `midnightntwrk/indexer-standalone:4.3.3` | `8088` |
-| `proof-server` | `midnightntwrk/proof-server:8.1.0` | `6300` |
-
-Un `docker compose up` (ejecutado dentro de `back/`) levanta las tres. Estos puertos coinciden con lo que la wallet Lace espera en modo "Undeployed", así que no requiere configuración adicional del lado de la wallet.
+Se genera junto con el resto de `back/contracts/` al correr `create-mn-app` (ver abajo) y luego se mueve a `back/docker-compose.yml`, para que un solo `docker compose up` ejecutado dentro de `back/` levante la red local completa (node + indexer + proof-server, red `undeployed`). Si algún script de `back/contracts/package.json` invoca `docker compose` asumiendo que el archivo está al lado, se ajusta ese script para apuntar a `../docker-compose.yml` tras el movimiento.
 
 ## `back/contracts/`
 
-- **Contrato de ejemplo** (`counter.compact`): contador público mínimo, sin estado privado ni witnesses, para validar el pipeline compile → deploy de punta a punta sin acoplarlo a ningún dominio de negocio:
+Se genera con la CLI oficial `create-mn-app`, seleccionando el tipo **Contract** y el template **hello-world** (el único que trae devnet local embebida y soporta `--network`), apuntado a la red `undeployed`:
 
-  ```compact
-  pragma language_version >= 0.16;
+```bash
+npx create-mn-app@latest contracts --template hello-world --network undeployed -y --use-npm --skip-git
+```
 
-  import CompactStandardLibrary;
+Esto genera, con versiones internamente consistentes ya resueltas por la herramienta:
 
-  export ledger round: Counter;
+- **Contrato de ejemplo** (`contracts/hello-world.compact`): contrato mínimo de almacenamiento de mensaje (`storeMessage`), sin estado privado, para validar el pipeline compile → deploy de punta a punta sin acoplarlo a ningún dominio de negocio.
+- **`package.json`** con las dependencias de deploy (`@midnight-ntwrk/midnight-js-*`, `wallet-sdk`, `testkit-js`, etc.) y scripts de compile/deploy ya cableados por la herramienta.
+- **`src/deploy.ts`**: arma los providers (indexer, proof, zk-config, private-state), usa una wallet pre-generada/fondeada contra la red local, despliega el contrato y confirma que el flujo completo funciona.
+- **`src/cli.ts`** / **`src/check-balance.ts`**: utilidades generadas para interactuar con el contrato ya desplegado y revisar el balance de la wallet.
 
-  export circuit increment(): [] {
-    round.increment(1);
-  }
-  ```
-
-- **Compilador Compact**: se gestiona vía `@midnight-ntwrk/midnight-js-compact` (devDependency), que descarga y administra el binario `compactc` a través de npm scripts (`fetch-compactc` / `run-compactc`), evitando depender de un instalador global fuera de npm.
-
-- **Dependencias de deploy** (pineadas, no rangos `^`/`latest`):
-  - `@midnight-ntwrk/compact-runtime` `^0.16.0`
-  - `@midnight-ntwrk/midnight-js-contracts` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-indexer-public-data-provider` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-http-client-proof-provider` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-node-zk-config-provider` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-level-private-state-provider` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-types` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-utils` `4.1.1`
-  - `@midnight-ntwrk/midnight-js-network-id` `4.1.1`
-  - `@midnight-ntwrk/wallet-sdk` `1.0.0`
-  - `ws`, `pino`/`pino-pretty` (requeridos por el runtime de indexer/logs)
-  - `tsx` (devDependency, para correr `deploy.ts` sin paso de build separado)
-
-- **`src/config.ts`**: endpoints fijos de la red local (`http://127.0.0.1:9944`, `http://127.0.0.1:8088/api/v4/graphql`, `http://127.0.0.1:6300`), `networkId: 'undeployed'`.
-
-- **`src/deploy.ts`**: arma los providers (indexer, proof, zk-config, private-state), usa la wallet génesis de la red local (seed `0x00...001`, ya fondeada por el propio contenedor `node` en modo `dev`), despliega `counter.compact` y llama `increment()` una vez para confirmar que el flujo completo funciona.
+`--skip-git` evita que la herramienta inicialice un repo git anidado dentro de `back/contracts/` (el repo ya existe en la raíz). `-y --use-npm` fuerzan modo no interactivo con npm como package manager, cumpliendo el requisito de usar npm.
 
 ## `front/`
 
