@@ -12,6 +12,14 @@ import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-j
 import * as VinchiNotes from './generated/VinchiNotes/index.js';
 import * as MerchantRegistry from './generated/MerchantRegistry/index.js';
 
+export type NoteBody = {
+  owner: Uint8Array;
+  amount: bigint;
+  maturesAt: bigint;
+  rateBps: bigint;
+  matured: boolean;
+};
+
 // deposit never invokes these — they're only reachable from pay/materialize/
 // redeem/pokeIndex/syncMerchantRoot — but the generated Contract class still
 // requires an implementation for every witness the .compact source declares.
@@ -61,6 +69,27 @@ export function loadVinchiNotesCompiledContract(witnessOverrides: Partial<Vinchi
  */
 export function computeOwnerCommitment(nullifierKey: Uint8Array): Uint8Array {
   return VinchiNotes.pureCircuits.ownerCommitment(nullifierKey);
+}
+
+/**
+ * noteCommitment(body, nonce) — the pure circuit VinchiNotes uses to hash a
+ * note's full contents into the 32-byte leaf stored in noteTree. Needed to
+ * turn a candidate (owner, amount, maturesAt, nonce) tuple into the value
+ * that's actually looked up on-chain (get_notes) or referenced when
+ * building a new note (send_pay's outputs).
+ */
+export function computeNoteCommitment(body: NoteBody, nonce: Uint8Array): Uint8Array {
+  return VinchiNotes.pureCircuits.noteCommitment(body, nonce);
+}
+
+/**
+ * noteNullifier(nonce, nullifierKey) — the pure circuit VinchiNotes uses to
+ * derive the public value published when a note is spent. Needed to check
+ * whether a candidate note has already been spent (get_notes) without
+ * needing to invoke the contract or a witness.
+ */
+export function computeNoteNullifier(nonce: Uint8Array, nullifierKey: Uint8Array): Uint8Array {
+  return VinchiNotes.pureCircuits.noteNullifier(nonce, nullifierKey);
 }
 
 const merchantRegistryWitnesses = {
