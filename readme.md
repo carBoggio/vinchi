@@ -16,6 +16,12 @@ Two independent npm projects:
   ```
   This brings up the Midnight node (`localhost:9944`), indexer (`localhost:8088`), and proof server (`localhost:6300`) on the `undeployed` network id.
 
+  To stop the backend:
+  ```
+  cd back
+  docker compose down
+  ```
+
   Contracts live in `back/contracts/` (scaffolded with `create-mn-app`). With the network running:
   ```
   cd back/contracts
