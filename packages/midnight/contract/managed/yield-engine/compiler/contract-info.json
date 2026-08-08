@@ -1,0 +1,296 @@
+{
+  "compiler-version": "0.31.1",
+  "language-version": "0.23.0",
+  "runtime-version": "0.16.0",
+  "circuits": [
+    {
+      "name": "poner_a_rendir",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "data",
+          "type": {
+            "type-name": "Struct",
+            "name": "HarvestData",
+            "elements": [
+              {
+                "name": "deployable",
+                "type": {
+                  "type-name": "Uint",
+                  "maxval": 340282366920938463463374607431768211455
+                }
+              },
+              {
+                "name": "reportedYield",
+                "type": {
+                  "type-name": "Uint",
+                  "maxval": 340282366920938463463374607431768211455
+                }
+              },
+              {
+                "name": "reportedAt",
+                "type": {
+                  "type-name": "Uint",
+                  "maxval": 18446744073709551615
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "currentIndex",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+      ],
+      "result-type": {
+        "type-name": "Uint",
+        "maxval": 6277101735386680763835789423207666416102355444464034512895
+      }
+    },
+    {
+      "name": "recordDeposit",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "amount",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 340282366920938463463374607431768211455
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "recordWithdraw",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "amount",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 340282366920938463463374607431768211455
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "setEngine",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "newEngine",
+          "type": {
+            "type-name": "Enum",
+            "name": "EngineKind",
+            "elements": [
+              "Passive",
+              "BridgedEvm",
+              "NativeAtlas",
+              "FiatReserve"
+            ]
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "setBufferBps",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "newBufferBps",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 65535
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "setStrategist",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "newStrategistAuth",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    }
+  ],
+  "witnesses": [
+    {
+      "name": "authSecret",
+      "arguments": [
+      ],
+      "result type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
+      "name": "divHint",
+      "arguments": [
+        {
+          "name": "n",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 22300745198530623141535718272648361505980415
+          }
+        },
+        {
+          "name": "d",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 4294967295
+          }
+        }
+      ],
+      "result type": {
+        "type-name": "Uint",
+        "maxval": 22300745198530623141535718272648361505980415
+      }
+    }
+  ],
+  "contracts": [
+  ],
+  "ledger": [
+    {
+      "name": "yieldIndex",
+      "index": 0,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Uint",
+        "maxval": 6277101735386680763835789423207666416102355444464034512895
+      }
+    },
+    {
+      "name": "indexCheckpoints",
+      "index": 1,
+      "exported": true,
+      "storage": "MerkleTree",
+      "depth": 16,
+      "type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
+      "name": "lastCheckpointAt",
+      "index": 2,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Uint",
+        "maxval": 18446744073709551615
+      }
+    },
+    {
+      "name": "totalCollateral",
+      "index": 3,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Uint",
+        "maxval": 340282366920938463463374607431768211455
+      }
+    },
+    {
+      "name": "deployedCapital",
+      "index": 4,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Uint",
+        "maxval": 340282366920938463463374607431768211455
+      }
+    },
+    {
+      "name": "activeEngine",
+      "index": 5,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Enum",
+        "name": "EngineKind",
+        "elements": [
+          "Passive",
+          "BridgedEvm",
+          "NativeAtlas",
+          "FiatReserve"
+        ]
+      }
+    },
+    {
+      "name": "bufferBps",
+      "index": 6,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Uint",
+        "maxval": 65535
+      }
+    },
+    {
+      "name": "governorAuth",
+      "index": 7,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
+      "name": "strategistAuth",
+      "index": 8,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    }
+  ]
+}
