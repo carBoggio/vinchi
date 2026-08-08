@@ -23,6 +23,7 @@ import * as Rx from 'rxjs';
 
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, ENV_NETWORK_VAR } from './network';
 import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
+import { computeGovernorKey, requireGovernorSecretKey } from './governor';
 
 import { deployContract } from '@midnight-ntwrk/midnight-js-contracts';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
@@ -38,13 +39,15 @@ const CONTRACT_NAMES = ['VinchiNotes', 'MerchantRegistry'] as const;
 type ContractName = (typeof CONTRACT_NAMES)[number];
 
 // Both contracts take a single constructor argument: governorPk, the hash
-// commitment of a governor secret key (see governorKey() in the .compact
-// source). No real governor key exists yet — Flujo 7's authentication
-// scheme and the governor CLI are future work — so this is 32 zero bytes,
-// a clearly-inert placeholder. governor-gated circuits (addMerchant,
-// pokeIndex, syncMerchantRoot) are unusable on this deployment until this
-// is replaced with a real commitment before Fase 7 work begins.
-const PLACEHOLDER_GOVERNOR_PK = new Uint8Array(32);
+// commitment of a governor secret key (governorKey(sk) — see governor.ts,
+// which replicates that non-exported .compact circuit). GOVERNOR_SECRET_KEY
+// in the repo-root .env is the real key; run generate-governor.ts once to
+// create one. Earlier deployments used 32 zero bytes as a placeholder
+// governorPk directly (not hashed) — since no secret key hashes to exactly
+// zero, every governor-gated circuit (addMerchant, pokeIndex,
+// syncMerchantRoot) was permanently unusable on those. governor is `sealed`
+// in the .compact source (fixed forever at construction), so this only
+// takes effect on contracts deployed *after* this change.
 
 function throwingWitness(name: string) {
   return () => {
@@ -104,6 +107,8 @@ async function main() {
   }
 
   loadRootEnv();
+  const governorSecretKey = requireGovernorSecretKey();
+  const governorPk = computeGovernorKey(governorSecretKey);
   const { network, config: networkConfig, source } = resolveNetwork();
   console.log(`\n╔══ Deploying ${contractName} to ${network} ══╗\n`);
   if (source === 'env') {
@@ -229,7 +234,7 @@ async function main() {
     try {
       deployed = await deployContract(providers, {
         compiledContract: compiledContract as any,
-        args: [PLACEHOLDER_GOVERNOR_PK],
+        args: [governorPk],
         privateStateId: `${contractName}PrivateState`,
         initialPrivateState: {},
       });
