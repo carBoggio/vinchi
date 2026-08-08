@@ -23,7 +23,13 @@ function throwingWitness(name: string) {
   };
 }
 
-const vinchiNotesWitnesses = {
+export type VinchiNotesWitnesses = {
+  governorSecretKey: (...args: never[]) => never;
+  nullifierKeyFor: (...args: never[]) => never;
+  mulDivFloorWitness: (...args: never[]) => never;
+};
+
+const defaultVinchiNotesWitnesses: VinchiNotesWitnesses = {
   governorSecretKey: throwingWitness('governorSecretKey'),
   nullifierKeyFor: throwingWitness('nullifierKeyFor'),
   mulDivFloorWitness: throwingWitness('mulDivFloorWitness'),
@@ -31,12 +37,19 @@ const vinchiNotesWitnesses = {
 
 /**
  * Wraps back/contracts' compiled VinchiNotes bindings as a CompiledContract
- * ready for findDeployedContract/callTx. Reused by every VinchiNotes circuit
- * caller (deposit, pay, ...) — one instance definition, not one per flow.
+ * ready for findDeployedContract/callTx. `witnessOverrides` replaces the
+ * default throwing stubs — deposit needs none of them (pass nothing), but
+ * pay/materialize/redeem genuinely invoke `nullifierKeyFor` to prove note
+ * ownership, so those flows must supply a real implementation (see
+ * noteWallet.ts's deriveNullifierKey — this project has one stable
+ * nullifierKey per seed, not per note, so the witness can ignore its `owner`
+ * argument and just return that key; the circuit itself double-checks
+ * ownerCommitment(key) == owner and rejects the proof if it's wrong).
  */
-export function loadVinchiNotesCompiledContract() {
+export function loadVinchiNotesCompiledContract(witnessOverrides: Partial<VinchiNotesWitnesses> = {}) {
+  const witnesses = { ...defaultVinchiNotesWitnesses, ...witnessOverrides };
   return CompiledContract.make('VinchiNotes', VinchiNotes.Contract as never).pipe(
-    CompiledContract.withWitnesses(vinchiNotesWitnesses as never),
+    CompiledContract.withWitnesses(witnesses as never),
   );
 }
 
