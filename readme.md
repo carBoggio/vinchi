@@ -18,6 +18,16 @@ At deploy time, the constructor is given `governorPk`, a hash commitment, and st
 
 **Known issue we hit and fixed (2026-08-08):** the first deployment used 32 zero bytes as `governorPk` directly (not the hash of anything) — since no secret key hashes to exactly zero, every governor-gated circuit was permanently unusable on that deployment, and because `governor` is `sealed`, this couldn't be patched in place. Fixed by generating a real governor secret key and redeploying both contracts with the correct `governorPk` — see `back/contracts/src/governor.ts` (replicates the non-exported `governorKey(sk)` circuit in plain TypeScript, verified bit-exact against the compiled contract) and `back/contracts/src/generate-governor.ts` (run once to create a key). `GOVERNOR_SECRET_KEY` in `.env` holds it now. The redeploy means any NIGHT deposited against the old `VINCHI_NOTES_ADDRESS` is orphaned there — deposit against the current address going forward.
 
+### Why `pay` always spends exactly 4 notes
+
+`pay`'s circuit signature takes a fixed `Vector<4, NoteInput>` and always produces exactly 2 outputs (merchant + change), padding with zero-value notes when the real payment doesn't need all of them. This is not a runtime parameter and not an oversight — it's load-bearing for privacy.
+
+If `pay` accepted a variable number of inputs, an observer watching the chain could count how many nullifiers/commitments a given payment transaction touches, and that count alone leaks information (a payment assembled from 3 old notes looks different on-chain from one spending a single large note). By *always* consuming exactly 4 inputs and producing exactly 2 outputs — real or zero-value — every payment transaction is shaped identically on-chain regardless of the real payment's size or note history. That uniformity is what keeps the payment graph private.
+
+**Consequence:** since `deposit` only ever mints one note per call, and `pay` needs 4 *real*, already-on-chain notes sharing the exact same `maturesAt` to spend any of them, a wallet needs at least 4 deposits (all with a matching `maturesAt`) before it can make its very first payment. There is no way to fabricate padding notes client-side — every one of the 4 inputs must already exist in `noteTree` with a valid Merkle path. `front/src/send_pay.tsx`'s `selectSpendGroup` enforces this and fails with a clear, actionable error (not a silent workaround) when fewer than 4 matching notes are available.
+
+This bootstrapping cost is a real, known trade-off of the current design, not a bug. A reasonable future improvement — not implemented here, since it requires changing the `deposit` circuit itself — would be for `deposit` to mint several same-`maturesAt` notes in one call instead of exactly one, so a single deposit could bootstrap a wallet's first payment.
+
 Two independent npm projects:
 
 - `front/` — React + Vite. Run with:
