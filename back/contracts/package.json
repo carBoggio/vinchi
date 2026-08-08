@@ -7,9 +7,12 @@
   "license": "MIT",
   "scripts": {
     "compile": "compact compile contracts/hello-world.compact contracts/managed/hello-world",
+    "compile:vinchi-notes": "compact compile contracts/VinchiNotes.compact contracts/managed/VinchiNotes",
+    "compile:merchant-registry": "compact compile contracts/MerchantRegistry.compact contracts/managed/MerchantRegistry",
     "build": "npx tsc --noEmit || true",
     "setup": "npx tsx src/setup.ts",
     "deploy": "npx tsx src/deploy.ts",
+    "deploy:address": "npx tsx src/deploy-address.ts",
     "cli": "npx tsx src/cli.ts",
     "check-balance": "npx tsx src/check-balance.ts",
     "network": "npx tsx src/network.ts",

@@ -1,0 +1,295 @@
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+// Vinchi core contract: deposit, pay, materialize, redeem, plus the minimal
+// governance and yield-index seam the MVP needs. See docs/superpowers context
+// for the full design rationale; the notes below only cover things that don't
+// survive contact with the installed Compact 0.31.1 toolchain unless called
+// out explicitly.
+//
+// Deviations from the plain reading of the spec's ledger-state table, found by
+// compiling against the real toolchain rather than assuming:
+//   - totalCollateral / totalIssued / accruedFees are plain Uint<128> ledger
+//     cells, not Counter. Counter.increment/decrement only accept Uint<16> in
+//     this compiler, which is far too small for NIGHT amounts (1 NIGHT =
+//     10^6 STAR). Counter is still the right type for merchantCount in
+//     MerchantRegistry.compact, where the increments are always 1.
+//   - governor is a `sealed` ledger field: the compiler statically rejects any
+//     exported circuit that writes it after construction, which is a stronger
+//     guarantee than "no circuit happens to write it today".
+//   - Compact has no division operator and no native multiplication wide
+//     enough for Uint<128> * Uint<128> (both are static errors). The
+//     materialize math (`shares = amount * RAY / index`) is computed by a
+//     witness-supplied quotient/remainder pair and verified in Field space
+//     (see mulDivFloor below) — the same pattern the official calculator
+//     tutorial uses for division, generalized to also dodge the multiply
+//     overflow.
+
+export struct NoteBody {
+  owner: Bytes<32>,
+  amount: Uint<128>,
+  maturesAt: Uint<64>,
+  rateBps: Uint<16>,
+  matured: Boolean
+}
+
+export struct NoteInput {
+  body: NoteBody,
+  nonce: Bytes<32>,
+  path: MerkleTreePath<16, Bytes<32>>
+}
+
+export struct NoteOutput {
+  body: NoteBody,
+  nonce: Bytes<32>
+}
+
+export ledger noteTree: MerkleTree<16, Bytes<32>>;
+export ledger nullifiers: Set<Bytes<32>>;
+export ledger totalCollateral: Uint<128>;
+export ledger totalIssued: Uint<128>;
+export ledger merchantRoot: MerkleTreeDigest;
+export ledger yieldIndex: Uint<128>;
+export ledger feeBps: Uint<16>;
+export ledger accruedFees: Uint<128>;
+sealed ledger governor: Bytes<32>;
+
+witness governorSecretKey(): Bytes<32>;
+witness nullifierKeyFor(owner: Bytes<32>): Bytes<32>;
+witness mulDivFloorWitness(a: Uint<128>, b: Uint<128>, c: Uint<128>): [Uint<128>, Uint<128>];
+
+constructor(governorPk: Bytes<32>) {
+  governor = disclose(governorPk);
+  yieldIndex = disclose(RAY());
+  // merchantRoot, feeBps, totalCollateral, totalIssued, accruedFees keep their
+  // ledger-state defaults (empty tree root / zero). No circuit here ever sets
+  // feeBps above 0 — the MVP has no yield to take a fee from (see Flujo 3).
+}
+
+export pure circuit RAY(): Uint<128> {
+  return 1000000000000000000;
+}
+
+// Fixed-point index lookup. Constant for the whole MVP (Flujo 5 is suspended:
+// no verified NIGHT-delegation primitive exists in Compact yet). Keeping this
+// as its own circuit is the seam: once a real yield source exists, this
+// becomes the only thing that has to change.
+circuit indexAt(maturesAt: Uint<64>): Uint<128> {
+  return yieldIndex;
+}
+
+circuit governorKey(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "vinchi:governor"), sk]);
+}
+
+export pure circuit ownerCommitment(nullifierKey: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "vinchi:owner"), nullifierKey]);
+}
+
+export pure circuit noteNullifier(nonce: Bytes<32>, nullifierKey: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "vinchi:nullifier"), nonce, nullifierKey]);
+}
+
+export pure circuit noteCommitment(body: NoteBody, nonce: Bytes<32>): Bytes<32> {
+  return persistentCommit<NoteBody>(body, nonce);
+}
+
+// floor(a * b / c), verified without ever forming the (overflowing) Uint<128>
+// product a*b: the cross-check runs in Field space, where the product fits
+// comfortably under the field's ~254-bit modulus for any realistic a, b, c.
+circuit mulDivFloor(a: Uint<128>, b: Uint<128>, c: Uint<128>): Uint<128> {
+  const divided = mulDivFloorWitness(a, b, c);
+  const quotient = divided[0];
+  const remainder = divided[1];
+  assert(remainder < c, "mulDivFloor: remainder out of range");
+  const lhs = (quotient as Field) * (c as Field) + (remainder as Field);
+  const rhs = (a as Field) * (b as Field);
+  assert(lhs == rhs, "mulDivFloor: product mismatch");
+  return quotient;
+}
+
+// --- Flujo 1: Depósito -------------------------------------------------
+
+export circuit deposit(
+  amount: Uint<128>,
+  recipientOwner: Bytes<32>,
+  maturesAt: Uint<64>,
+  nonce: Bytes<32>
+): [] {
+  assert(amount > 0, "amount must be positive");
+  assert(blockTimeLt(disclose(maturesAt)), "maturesAt must be in the future");
+
+  // The circuit only declares the receive obligation; the wallet supplies the
+  // matching spend proof and the proof server balances the transaction. This
+  // amount is necessarily public — NIGHT is unshielded (see threat model).
+  receiveUnshielded(nativeToken(), disclose(amount));
+
+  const body = NoteBody {
+    owner: disclose(recipientOwner),
+    amount: disclose(amount),
+    maturesAt: disclose(maturesAt),
+    rateBps: 0,
+    matured: false
+  };
+  noteTree.insert(noteCommitment(body, nonce));
+
+  totalCollateral = disclose((totalCollateral + amount) as Uint<128>);
+  totalIssued = disclose((totalIssued + amount) as Uint<128>);
+}
+
+// --- Flujo 2: Pago -------------------------------------------------------
+
+// PAY_INPUTS = 4, PAY_OUTPUTS = 2 are baked into this signature (a fixed
+// Vector arity plus two named outputs), not passed as runtime parameters —
+// that's what makes them compile-time constants. Both outputs are always
+// inserted into noteTree, including a zero-value change output, so the
+// number of commitments published never varies with the real payment shape.
+circuit spendInput(input: NoteInput, sharedMaturesAt: Uint<64>): Uint<128> {
+  assert(input.body.maturesAt == sharedMaturesAt, "inputs must share maturesAt");
+  assert(!input.body.matured, "pay only spends lUSDv notes");
+
+  assert(noteCommitment(input.body, input.nonce) == input.path.leaf, "commitment mismatch");
+  assert(
+    noteTree.checkRoot(disclose(merkleTreePathRoot<16, Bytes<32>>(input.path))),
+    "input not in note tree"
+  );
+
+  const nullifierKey = nullifierKeyFor(input.body.owner);
+  assert(ownerCommitment(nullifierKey) == input.body.owner, "not the owner");
+  const nul = noteNullifier(input.nonce, nullifierKey);
+  assert(!nullifiers.member(disclose(nul)), "input already spent");
+  nullifiers.insert(disclose(nul));
+
+  return input.body.amount;
+}
+
+export circuit pay(
+  inputs: Vector<4, NoteInput>,
+  merchantOutput: NoteOutput,
+  merchantPath: MerkleTreePath<10, Bytes<32>>,
+  changeOutput: NoteOutput
+): [] {
+  const sharedMaturesAt = inputs[0].body.maturesAt;
+
+  const sumIn =
+    spendInput(inputs[0], sharedMaturesAt) +
+    spendInput(inputs[1], sharedMaturesAt) +
+    spendInput(inputs[2], sharedMaturesAt) +
+    spendInput(inputs[3], sharedMaturesAt);
+
+  assert(merchantOutput.body.maturesAt == sharedMaturesAt, "merchant output must inherit maturesAt");
+  assert(!merchantOutput.body.matured, "merchant output must be lUSDv");
+  assert(changeOutput.body.maturesAt == sharedMaturesAt, "change output must inherit maturesAt");
+  assert(!changeOutput.body.matured, "change output must be lUSDv");
+
+  const sumOut = merchantOutput.body.amount + changeOutput.body.amount;
+  assert(sumIn == sumOut, "inputs and outputs must balance");
+
+  // Membership is proven, not revealed: merchantPath proves merchantOutput's
+  // owner is some leaf of the merchant tree, without disclosing which one.
+  assert(merchantPath.leaf == merchantOutput.body.owner, "merchant path not bound to recipient");
+  assert(
+    disclose(merkleTreePathRoot<10, Bytes<32>>(merchantPath)) == merchantRoot,
+    "recipient is not a registered merchant"
+  );
+
+  noteTree.insert(noteCommitment(merchantOutput.body, merchantOutput.nonce));
+  noteTree.insert(noteCommitment(changeOutput.body, changeOutput.nonce));
+}
+
+// --- Flujo 3: Materialización ---------------------------------------------
+
+export circuit materialize(input: NoteInput, outputNonce: Bytes<32>): [] {
+  assert(!input.body.matured, "note already materialized");
+  assert(blockTimeGte(disclose(input.body.maturesAt)), "note not yet matured");
+
+  assert(noteCommitment(input.body, input.nonce) == input.path.leaf, "commitment mismatch");
+  assert(
+    noteTree.checkRoot(disclose(merkleTreePathRoot<16, Bytes<32>>(input.path))),
+    "input not in note tree"
+  );
+
+  const nullifierKey = nullifierKeyFor(input.body.owner);
+  assert(ownerCommitment(nullifierKey) == input.body.owner, "not the owner");
+  const nul = noteNullifier(input.nonce, nullifierKey);
+  assert(!nullifiers.member(disclose(nul)), "input already spent");
+  nullifiers.insert(disclose(nul));
+
+  const index = indexAt(input.body.maturesAt);
+  const grossShares = mulDivFloor(input.body.amount, RAY(), index);
+  // feeBps is always 0 in this MVP (nothing ever sets it above 0 — see
+  // constructor), so fee is always 0 too. The formula stays general so the
+  // seam survives once yield — and therefore a real fee — exists.
+  const fee = mulDivFloor(grossShares, feeBps as Uint<128>, 10000);
+  const netShares = grossShares - fee;
+
+  const newBody = NoteBody {
+    owner: input.body.owner,
+    amount: disclose(netShares),
+    maturesAt: input.body.maturesAt,
+    rateBps: input.body.rateBps,
+    matured: true
+  };
+  noteTree.insert(noteCommitment(newBody, outputNonce));
+
+  accruedFees = disclose((accruedFees + fee) as Uint<128>);
+  totalIssued = disclose((totalIssued - input.body.amount + netShares) as Uint<128>);
+}
+
+// --- Flujo 4: Retiro -------------------------------------------------------
+
+// No governance parameter appears anywhere in this signature or body, and
+// none may be added: that is what makes redeem structurally unpausable
+// rather than merely unpaused by convention. Re-check this invariant on any
+// future edit to this circuit.
+export circuit redeem(input: NoteInput, recipient: UserAddress): [] {
+  assert(input.body.matured, "note is not mature");
+
+  assert(noteCommitment(input.body, input.nonce) == input.path.leaf, "commitment mismatch");
+  assert(
+    noteTree.checkRoot(disclose(merkleTreePathRoot<16, Bytes<32>>(input.path))),
+    "input not in note tree"
+  );
+
+  const nullifierKey = nullifierKeyFor(input.body.owner);
+  assert(ownerCommitment(nullifierKey) == input.body.owner, "not the owner");
+  const nul = noteNullifier(input.nonce, nullifierKey);
+  assert(!nullifiers.member(disclose(nul)), "input already spent");
+  nullifiers.insert(disclose(nul));
+
+  // unshieldedBalanceGte, not a stored balance snapshot: the latter would
+  // pin the transaction to the exact balance at proof-construction time and
+  // any unrelated deposit landing first would make this redeem un-appliable.
+  assert(unshieldedBalanceGte(nativeToken(), disclose(input.body.amount)), "insufficient reserves");
+  sendUnshielded(
+    nativeToken(),
+    disclose(input.body.amount),
+    right<ContractAddress, UserAddress>(disclose(recipient))
+  );
+
+  totalCollateral = disclose(totalCollateral - input.body.amount);
+  totalIssued = disclose(totalIssued - input.body.amount);
+}
+
+// --- Flujo 5: Rendimiento (en suspenso) ------------------------------------
+
+// pokeIndex exists so the non-decreasing invariant has somewhere to live, but
+// nothing calls it with real data yet — there is no verified NIGHT-delegation
+// primitive in Compact (see the file header note and the project's Flujo 5).
+// Governor-gated only as a stopgap until a real yield engine replaces it.
+export circuit pokeIndex(newIndex: Uint<128>): [] {
+  assert(governor == governorKey(governorSecretKey()), "not governor");
+  assert(newIndex >= yieldIndex, "index must not decrease");
+  yieldIndex = disclose(newIndex);
+}
+
+// --- Flujo 7: Alta de comercio (root sync) ---------------------------------
+
+// MerchantRegistry is a separate, independently deployed contract (no
+// cross-contract calls in this MVP); this just receives the root the
+// governor already updated there.
+export circuit syncMerchantRoot(newRoot: MerkleTreeDigest): [] {
+  assert(governor == governorKey(governorSecretKey()), "not governor");
+  merchantRoot = disclose(newRoot);
+}

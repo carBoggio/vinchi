@@ -1,0 +1,39 @@
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+// Public registry of merchants allowed to receive Vinchi payments. The tree is
+// public on purpose (Flujo 7: "el árbol de comercios es público a propósito").
+// VinchiNotes never reads this contract directly (no cross-contract calls in
+// the MVP) — the governor republishes the current root into VinchiNotes via
+// its own `syncMerchantRoot` circuit after any change here.
+//
+// Depth chosen for the MVP; revisit alongside Fase 0's tree-growth measurements.
+// Leaves must be `ownerCommitment(nullifierKey)` values computed with the exact
+// same domain separator VinchiNotes uses ("vinchi:owner"), so a merchant can
+// later spend/materialize/redeem the notes it receives through the normal
+// ownership check. Do not register a differently-derived "merchant identity" —
+// that would make received notes unspendable by the merchant.
+
+export ledger merchants: MerkleTree<10, Bytes<32>>;
+export ledger merchantCount: Counter;
+sealed ledger governor: Bytes<32>;
+
+witness governorSecretKey(): Bytes<32>;
+
+constructor(governorPk: Bytes<32>) {
+  governor = disclose(governorPk);
+}
+
+circuit governorKey(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "vinchi:governor"), sk]);
+}
+
+// merchantOwnerCommitment must equal ownerCommitment(nullifierKey) for the
+// merchant's own nullifier key, computed off-chain the same way VinchiNotes
+// computes it for any note owner.
+export circuit addMerchant(merchantOwnerCommitment: Bytes<32>): [] {
+  assert(governor == governorKey(governorSecretKey()), "not governor");
+  merchants.insert(disclose(merchantOwnerCommitment));
+  merchantCount.increment(1);
+}

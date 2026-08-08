@@ -154,7 +154,10 @@ export interface ResolveOptions {
   cwd?: string;
 }
 
-export type ResolveSource = 'flag' | 'state' | 'default';
+export type ResolveSource = 'flag' | 'env' | 'state' | 'default';
+
+/** Env var that selects the target network directly (e.g. from a loaded .env file). */
+export const ENV_NETWORK_VAR = 'MIDNIGHT_NETWORK';
 
 export interface ResolveResult {
   network: NetworkId;
@@ -191,6 +194,18 @@ export function resolveNetwork(opts: ResolveOptions = {}): ResolveResult {
   if (flag) {
     network = flag;
     source = 'flag';
+  } else if (env[ENV_NETWORK_VAR] !== undefined) {
+    // Explicit config (e.g. MIDNIGHT_NETWORK in a loaded .env file) beats the
+    // sticky "last used" state file — the latter is a convenience default,
+    // this is a deliberate choice of where to deploy.
+    const envNetwork = env[ENV_NETWORK_VAR];
+    if (!isNetworkId(envNetwork)) {
+      throw new Error(
+        `Unknown network in ${ENV_NETWORK_VAR}: "${envNetwork}". Supported: ${NETWORK_IDS.join(', ')}.`,
+      );
+    }
+    network = envNetwork;
+    source = 'env';
   } else {
     const state = loadState({ cwd });
     if (state) {
